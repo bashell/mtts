@@ -1,2 +1,2 @@
-# mhs
-Multi-thread Http Server based on libevent
+# mtts
+Multi-thread Tcp Server based on libevent
