@@ -129,10 +129,3 @@ CQ_ITEM* MyQueue::cq_pop(CQ *cq) {
   return item;
 }
 
-/*
-int main()
-{
-  MyQueue mq;
-  return 0;
-}
-*/

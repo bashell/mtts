@@ -7,11 +7,11 @@
 #include "my_libevent.h"
 
 
-MyLibevent::MyLibevent() : 
-    last_thread_(-1), threads_total_num_(DEFAULT_MAXTHREADS), 
+MyLibevent::MyLibevent() 
+  : last_thread_(-1), threads_total_num_(DEFAULT_MAXTHREADS), 
     threads_init_num_(0), cqi_flist_(NULL), threads_(NULL) 
 {
-  preparation();
+  start_operations();
 }
 
 
@@ -19,19 +19,31 @@ MyLibevent::MyLibevent(int nthreads) :
     last_thread_(-1), threads_total_num_(nthreads), 
     threads_init_num_(0), cqi_flist_(NULL), threads_(NULL)
 {
-  preparation();
+  start_operations();
 } 
 
 
 MyLibevent::~MyLibevent() {
-  /* 添加各种free */
+  stop_operations();
+}
+
+
+/**
+ * Sever start.
+ *
+ * @param sockfd: socket fd
+ * @param main_base: dispatcher event_base
+ */
+void MyLibevent::server_start(int sockfd, struct event_base *main_base) {
+  libevent_thread_init();
+  master_thread_loop(sockfd, main_base);
 }
 
 
 /**
  * Operations used in constructor
  */
-void MyLibevent::preparation() {
+void MyLibevent::start_operations() {
   int ret;
   
   // initialize mutex
@@ -62,10 +74,52 @@ void MyLibevent::preparation() {
 
 
 /**
+ * Operations used in destructor
+ */
+void MyLibevent::stop_operations() {
+  int i;
+  char buf[1];
+
+  // notify slave threads to stop
+  buf[0] = 'p';
+  for(i = 0; i < threads_init_num_; ++i) {
+    if(write(threads_[i].send_fd_, buf, 1) != 1)
+      perror("Writing to thread notify pipe");
+  }
+
+  // master thread stop
+  event_base_loopexit(dispatcher_thread_.base_, NULL);
+
+  // destroy mutex and cond
+  pthread_mutex_destroy(&init_lock_);
+  pthread_cond_destroy(&init_cond_);
+
+  // free base event of master and slave threads
+  for(i = 0; i < threads_init_num_; ++i) {
+    event_base_free(threads_[i].base_);
+  }
+  event_base_free(dispatcher_thread_.base_);
+
+  // free connection item freelist
+  pthread_mutex_destroy( &(cqi_flist_->cqi_freelist_lock_) );
+  if(NULL != cqi_flist_) {
+    CQ_ITEM *ptr1 = cqi_flist_->cqi_freelist_;
+    while(ptr1) {
+      CQ_ITEM *ptr2 = ptr1;
+      ptr1 = ptr1->next_;
+      free(ptr2);
+      ptr2 = NULL;
+    }
+    free(cqi_flist_);
+    cqi_flist_ = NULL;
+  }
+}
+
+/**
  * Initialize libevent thread
  */
 void MyLibevent::libevent_thread_init() {
-  int i, ret;
+  int i;
   threads_ = (LIBEVENT_THREAD*)calloc(threads_total_num_, sizeof(LIBEVENT_THREAD));
   if(NULL == threads_) {
     perror("Can't allocate thread descriptors");
@@ -73,14 +127,14 @@ void MyLibevent::libevent_thread_init() {
   }
 
   for(i = 0; i < threads_total_num_; ++i) {
-    // 主线程与子线程之间建立管道
+    // setup pipe between master and slave threads
     int fds[2];
     if(pipe(fds)) {
       perror("Can't create notify pipe");
       exit(EXIT_FAILURE);
     }
-    threads_[i].recv_fd_ = fds[0];  // 读端
-    threads_[i].send_fd_ = fds[1];  // 写端
+    threads_[i].recv_fd_ = fds[0];  // read
+    threads_[i].send_fd_ = fds[1];  // write
 
     threads_[i].ml_ptr_ = this;
     libevent_thread_setup(&threads_[i]);
@@ -90,7 +144,7 @@ void MyLibevent::libevent_thread_init() {
     create_worker(&threads_[i]);
   }
 
-  // 等待所有线程设置结束后再返回
+  // wait until all slave threads have been setup
   pthread_mutex_lock(&init_lock_);
   while(threads_init_num_ < threads_total_num_)
     pthread_cond_wait(&init_cond_, &init_lock_);
@@ -99,7 +153,9 @@ void MyLibevent::libevent_thread_init() {
 
 
 /**
- * 设置子线程信息
+ * setup LIBEVENT_THREAD (slave thread)
+ *
+ * @param me: pointer to slave thread
  */
 void MyLibevent::libevent_thread_setup(LIBEVENT_THREAD *me) {
   me->base_ = event_base_new();
@@ -108,14 +164,18 @@ void MyLibevent::libevent_thread_setup(LIBEVENT_THREAD *me) {
     exit(EXIT_FAILURE);
   }
 
-  // 子线程监听管道
-  me->notify_event_ = event_new(me->base_, me->recv_fd_, EV_READ|EV_PERSIST, libevent_thread_process, (void*)me);
+  // let slave thread monitor pipe
+  me->notify_event_ = event_new(me->base_, 
+                                me->recv_fd_, 
+                                EV_READ|EV_PERSIST, 
+                                libevent_thread_process, 
+                                (void*)me);
   if(event_add(me->notify_event_, NULL) == -1) {
     perror("Can't monitor pipe.");
     exit(EXIT_FAILURE);
-  } 
+  }
   
-  // 构造并初始化子线程的连接队列
+  // allocate memory for connection queue
   me->conn_queue_ = (CQ*)malloc(sizeof(CQ));
   if(NULL == me->conn_queue_) {
     perror("Failed to allocate memory for connection queue.");
@@ -126,46 +186,58 @@ void MyLibevent::libevent_thread_setup(LIBEVENT_THREAD *me) {
 
 
 /**
- * 子线程管道可读时的回调
+ * Callback function called when pipe is readable
  */
 void MyLibevent::libevent_thread_process(evutil_socket_t fd, short what, void *arg) {
   LIBEVENT_THREAD *me = (LIBEVENT_THREAD*)arg;
   CQ_ITEM *item = NULL;
   char buf[1];
-  //struct timeval tv = {5, 0};
+  struct timeval tv_timeout = {60, 0};
 
   if(read(fd, buf, 1) != 1)
     fprintf(stderr, "Can't read from libevent pipe.\n");
 
-  printf("libevent_thread_process\n");
+#ifdef PRINT_DEBUG
+  printf("Connected, ready to read!\n");
+#endif
 
-  item = MyQueue::cq_pop(me->conn_queue_)
+  switch(buf[0]) {
+    // connection
+    case 'c':  
+    item = MyQueue::cq_pop(me->conn_queue_);
+  
+    if(NULL != item) { 
+      struct bufferevent *bev = bufferevent_socket_new(me->base_, 
+                                                       item->fd_, 
+                                                       BEV_OPT_CLOSE_ON_FREE);
+      if(NULL == bev) {
+        fprintf(stderr, "Failed to construct bufferevent.\n");
+        event_base_loopbreak(me->base_);
+        exit(EXIT_FAILURE);
+      }
+    
+      // setup callback_fn
+      bufferevent_setcb(bev, readcb, writecb, eventcb, arg);
+ 
+      // set the read and write timeout for bufferevent
+      bufferevent_set_timeouts(bev, &tv_timeout, &tv_timeout);  
 
-  if(NULL != item) {
-    struct bufferevent *bev = bufferevent_socket_new(me->base_, item->fd_, BEV_OPT_CLOSE_ON_FREE);
-    if(NULL == bev) {
-      fprintf(stderr, "Failed to construct bufferevent.\n");
-      event_base_loopbreak(me->base_);
-      exit(EXIT_FAILURE);
+      bufferevent_enable(bev, EV_READ|EV_WRITE);
+
+      MyQueue::cqi_free(item, me->ml_ptr_->cqi_flist_);
     }
-      
-    bufferevent_setcb(bev, readcb, writecb, eventcb, NULL);
+    break;
 
-    //bufferevent_set_timeouts(bev, &tv, &tv);  // set the read and write timeout for buffered event
-
-    //bufferevent_enable(bev, EV_READ|EV_WRITE|EV_PERSIST);
-    bufferevent_enable(bev, EV_READ | EV_WRITE);
-
-
-    MyQueue::cqi_free(item, me->ml_ptr_->cqi_flist_);
+    // pause
+    case 'p':
+    event_base_loopexit(me->base_, NULL);
+    printf("Slave thread stop\n");
   }
 }
 
 
 /**
- * 创建工作线程
- *
- * @param me: LIBEVENT_THREAD指针
+ * Create worker thread
  */
 void MyLibevent::create_worker(void *arg) {
   int ret;
@@ -178,18 +250,18 @@ void MyLibevent::create_worker(void *arg) {
     fprintf(stderr, "Can't create thread: %s\n", strerror(ret));
     exit(EXIT_FAILURE);
   }
-
-  printf("create_worker\n");
 }
 
 
 /**
- * 
+ * Thread start function
  */
 void* MyLibevent::worker_libevent(void *arg) {
   LIBEVENT_THREAD *me = (LIBEVENT_THREAD*)arg;
 
-  printf("Worker thread %u started\n", (unsigned int)me->tid_);
+#ifdef PRINT_DEBUG
+  printf("Worker thread %lu started\n", me->tid_);
+#endif
 
   pthread_mutex_lock(&me->ml_ptr_->init_lock_);
   ++ me->ml_ptr_->threads_init_num_;
@@ -203,41 +275,50 @@ void* MyLibevent::worker_libevent(void *arg) {
 
 
 /**
+ * Loop for master thread
  *
+ * @param sockfd: socket fd
+ * @param main_base: event_base of master thread
  */
 void MyLibevent::master_thread_loop(int sockfd, struct event_base *main_base) {
-  struct timeval tv = {10, 0};
- 
+
   // Setup dispatcher thread
   dispatcher_thread_.tid_ = pthread_self();
   dispatcher_thread_.base_ = main_base;
   dispatcher_thread_.ml_ptr_ = this;
 
+#ifdef PRINT_DEBUG
+  printf("Dispatcher thread %lu started\n", dispatcher_thread_.tid_);
+#endif
 
-  printf("Dispatcher thread %u started\n", (unsigned int)dispatcher_thread_.tid_);
-
-  struct event *main_event = event_new(dispatcher_thread_.base_, sockfd, EV_READ|EV_PERSIST, accept_cb, (void*)&dispatcher_thread_);
+  struct event *main_event = event_new(dispatcher_thread_.base_, 
+                                       sockfd, 
+                                       EV_READ|EV_PERSIST, 
+                                       accept_cb, 
+                                       (void*)&dispatcher_thread_);
   if(event_add(main_event, NULL) == -1) {
     perror("event_add failed");
     exit(EXIT_FAILURE);
   }
-  
-  //struct event *timeout_event = event_new(main_base_, -1, EV_TIMEOUT|EV_PERSIST, timeout_cb, NULL);
-  struct event *timeout_event = evtimer_new(dispatcher_thread_.base_, timeout_cb, (void*)&dispatcher_thread_);
-  if(event_add(timeout_event, &tv) == -1) {
+ 
+  struct timeval check_tv = {CHECK_PERIOD, 0};
+  struct event *check_event = event_new(dispatcher_thread_.base_, 
+                                        -1, EV_TIMEOUT|EV_PERSIST, 
+                                        timeout_cb, (void*)&dispatcher_thread_);
+  if(event_add(check_event, &check_tv) == -1) {
     perror("event_add failed");
     exit(EXIT_FAILURE);
   }
-
+  
   event_base_dispatch(dispatcher_thread_.base_);
+
 }
 
 
 /**
- * 连接请求处理
+ * Callback function called when connection request comes.
  */
 void MyLibevent::accept_cb(int fd, short what, void *arg) {
-  LIBEVENT_DISPATCHER_THREAD *me = (LIBEVENT_DISPATCHER_THREAD*)arg;
   int connfd;
   struct sockaddr_in client_addr;
   socklen_t client_len = sizeof(client_addr);
@@ -246,7 +327,7 @@ void MyLibevent::accept_cb(int fd, short what, void *arg) {
   connfd = accept(fd, (struct sockaddr*)&client_addr, &client_len);
   if(connfd == -1) {
     if(errno == EAGAIN || errno == EWOULDBLOCK) {
-      // ...
+      // TO DO
     } else {
       fprintf(stderr, "Too many open connections.\n");
       exit(EXIT_FAILURE);
@@ -264,17 +345,21 @@ void MyLibevent::accept_cb(int fd, short what, void *arg) {
   }
 
   dispatch_conn_new(connfd, EV_READ|EV_PERSIST, arg);
-  
-  //event_base_loopexit(me->base_, NULL);
 }
 
 
 /**
- * 分配新连接
+ * Dispatch new connection ( called by master thread )
+ *
+ * @param sfd: socket fd used for conncetion
+ * @param ev_flag: event flags
+ * @param arg: used to transfer the pointer to master thread
  */
 void MyLibevent::dispatch_conn_new(int sfd, int ev_flag, void *arg) {
   LIBEVENT_DISPATCHER_THREAD *me = (LIBEVENT_DISPATCHER_THREAD*)arg;
   char buf[1];
+  int tid;
+
   CQ_ITEM *item = MyQueue::cqi_new(me->ml_ptr_->cqi_flist_);
   if(NULL == item) {
     close(sfd);
@@ -282,18 +367,29 @@ void MyLibevent::dispatch_conn_new(int sfd, int ev_flag, void *arg) {
     return ;
   }
 
-  int tid = (me->ml_ptr_->last_thread_ + 1) % me->ml_ptr_->threads_total_num_;
+  // worker distribution
+  tid = (me->ml_ptr_->last_thread_ + 1) % me->ml_ptr_->threads_total_num_;
   me->ml_ptr_->last_thread_ = tid;
   
   LIBEVENT_THREAD *thread = me->ml_ptr_->threads_ + tid;
 
   item->fd_ = sfd;
   item->ev_flag_ = ev_flag;
-  
+ 
+  // add task to connection queue
   MyQueue::cq_push(thread->conn_queue_, item);
+  
 
-  // dispatch
-
+  int ret = me->ml_ptr_->myfd_.fd_register(sfd);
+#ifdef PRINT_DEBUG
+  if(ret == 1) {
+    printf("Register fd = %d success\n", sfd);
+  } else {
+    printf("Register fd = %d failed\n", sfd);
+  }
+#endif
+ 
+  // connection notify
   buf[0] = 'c';
   if(write(thread->send_fd_, buf, 1) != 1)
     perror("Writing to thread notify pipe");
@@ -301,77 +397,68 @@ void MyLibevent::dispatch_conn_new(int sfd, int ev_flag, void *arg) {
 
 
 /**
- * 
+ * Callback function called when TIMEOUT
  */
 void MyLibevent::timeout_cb(int fd, short what, void *arg) {
   LIBEVENT_DISPATCHER_THREAD *me = (LIBEVENT_DISPATCHER_THREAD*)arg;
-  printf("Timeout!\n");
-  if(what & EV_TIMEOUT)
-    me->ml_ptr_->myfd_.fd_close_if_necessary(time(NULL));
+
+  if(what & EV_TIMEOUT) {
+
+#ifdef PRINT_DEBUG
+    printf("Close fds which are not used for long time.\n");
+#endif
+    time_t now = time(NULL);
+    me->ml_ptr_->myfd_.fd_close_if_necessary(now);
+  }
 }
 
 
 /**
- *
+ * Read callback
  */
 void MyLibevent::readcb(struct bufferevent *bev, void *ctx) {
-  char buf[1024];
-  int n;
+  LIBEVENT_THREAD *me = (LIBEVENT_THREAD *)ctx;
 
   struct evbuffer *input = bufferevent_get_input(bev);
   struct evbuffer *output = bufferevent_get_output(bev);
   int fd = bufferevent_getfd(bev);
+  time_t now = time(NULL);
 
-  //time_t now = time(NULL);
-  //fd_update_visited_time(fd, now);
+#ifdef PRINT_DEBUG
+  printf("\nThread %lu is processing now\n", me->tid_);
+#endif
+
+  me->ml_ptr_->myfd_.fd_update_visited_time(fd, now);
   
-  //evbuffer_add_buffer(output, input);
-  while((n = evbuffer_remove(input, buf, sizeof(buf))) > 0) {
-    printf("fd = %d, received: %s at thread = %ld\n", fd, buf, pthread_self());
-    evbuffer_add(output, buf, n);
-  }
+  evbuffer_add_buffer(output, input);
 }
 
 
 /**
- *
+ * Write callback
  */
 void MyLibevent::writecb(struct bufferevent *bev, void *ctx) {
-  //...
+  // TO DO
 }
 
 
 /**
- *
+ * Event callback
  */
 void MyLibevent::eventcb(struct bufferevent *bev, short events, void *ctx) {
-  if(events & EV_TIMEOUT)
-    fprintf(stderr, "Timeout.\n");
-  if(events & BEV_EVENT_ERROR)
+  if(events & BEV_EVENT_ERROR) {
     fprintf(stderr, "Error from bufferevent.\n");
-  if(events & (BEV_EVENT_ERROR | BEV_EVENT_EOF))
-    bufferevent_free(bev);
-  if(events & (BEV_EVENT_TIMEOUT | BEV_EVENT_READING))
-    fprintf(stderr, "Read timeout.\n");
-  if(events & (BEV_EVENT_TIMEOUT | BEV_EVENT_WRITING))
-    fprintf(stderr, "Write timeout.\n");
-}
-
-
-
-int main()
-{
-  MyLibevent ml;
-  
-  int sockfd = mysocket::socket_setup("127.0.0.1", 8888);
-  
-  struct event_base *main_base = event_base_new();
-  if(NULL == main_base) {
-    fprintf(stderr, "Failed to construct event base");
-    exit(EXIT_FAILURE);
   }
-
-  ml.libevent_thread_init();
-  ml.master_thread_loop(sockfd, main_base);
-  return 0;
+  else if(events & (BEV_EVENT_ERROR | BEV_EVENT_EOF)) {
+    printf("Closing.\n");
+    bufferevent_free(bev);
+  }
+  else if(events & (BEV_EVENT_TIMEOUT | BEV_EVENT_READING)) {
+    fprintf(stderr, "Read timeout.\n");
+  }
+  else if(events & (BEV_EVENT_TIMEOUT | BEV_EVENT_WRITING)) {
+    fprintf(stderr, "Write timeout.\n");
+  }
 }
+
+

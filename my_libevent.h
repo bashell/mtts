@@ -10,7 +10,15 @@
 #include "my_queue.h"
 #include "my_fd.h"
 
-#define DEFAULT_MAXTHREADS 3
+#define DEFAULT_MAXTHREADS (sysconf(_SC_NPROCESSORS_CONF)-1)
+
+//#define PRINT_DEBUG
+
+#ifdef  GET_FD_LOG
+#define PRINT_DEBUG
+#endif
+
+#define CHECK_PERIOD 60
 
 typedef struct {
   pthread_t tid_;
@@ -35,6 +43,8 @@ class MyLibevent {
   MyLibevent(int nthreads);
   ~MyLibevent();
 
+  void server_start(int sockfd, struct event_base *main_base);
+
   void libevent_thread_init();
   void master_thread_loop(int sockfd, struct event_base *main_base);
 
@@ -47,7 +57,8 @@ class MyLibevent {
   MyLibevent(const MyLibevent&) = delete;
   MyLibevent &operator=(const MyLibevent&) = delete;
   
-  void preparation(); 
+  void start_operations();
+  void stop_operations();
   static void libevent_thread_setup(LIBEVENT_THREAD *me);
   static void libevent_thread_process(evutil_socket_t fd, short what, void *arg);
 
@@ -68,7 +79,6 @@ class MyLibevent {
 
   CQ_ITEM_FLIST *cqi_flist_;
   LIBEVENT_THREAD *threads_;
-
   LIBEVENT_DISPATCHER_THREAD dispatcher_thread_;
   MyFd myfd_;
 };

@@ -2,6 +2,7 @@
 #define _MY_MUTEX_H_
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <assert.h>
 
