@@ -8,7 +8,7 @@
 
 
 MyLibevent::MyLibevent() 
-  : last_thread_(-1), threads_total_num_(DEFAULT_MAXTHREADS), 
+  : last_thread_(-1), threads_total_num_(MAX_SLAVE_THREAD_NUM), 
     threads_init_num_(0), cqi_flist_(NULL), threads_(NULL) 
 {
   start_operations();
@@ -25,18 +25,6 @@ MyLibevent::MyLibevent(int nthreads) :
 
 MyLibevent::~MyLibevent() {
   stop_operations();
-}
-
-
-/**
- * Sever start.
- *
- * @param sockfd: socket fd
- * @param main_base: dispatcher event_base
- */
-void MyLibevent::server_start(int sockfd, struct event_base *main_base) {
-  libevent_thread_init();
-  master_thread_loop(sockfd, main_base);
 }
 
 
@@ -60,13 +48,27 @@ void MyLibevent::start_operations() {
     exit(EXIT_FAILURE);
   }
   
-  // allocate memory for freelist of conn_queue
+  // allocate memory for freelist of connection queue
   cqi_flist_ = (CQ_ITEM_FLIST*)malloc(sizeof(CQ_ITEM_FLIST));
   if(NULL == cqi_flist_) {
     perror("Failed to allocate memory for freelist of connection queue.");
     exit(EXIT_FAILURE);
   }
   MyQueue::cqi_flist_init(cqi_flist_);
+
+  // allocate memory for slave threads
+  threads_ = (LIBEVENT_THREAD*)calloc(threads_total_num_, sizeof(LIBEVENT_THREAD));
+  if(NULL == threads_) {
+    perror("calloc");
+    exit(EXIT_FAILURE);
+  }
+
+  // allocate memory for master thread
+  dispatcher_thread_ = (LIBEVENT_DISPATCHER_THREAD*)calloc(1, sizeof(LIBEVENT_DISPATCHER_THREAD));
+  if(NULL == dispatcher_thread_) {
+    perror("calloc");
+    exit(EXIT_FAILURE);
+  }
 
   // initialize fd_set
   myfd_.fd_set_init();
@@ -88,43 +90,46 @@ void MyLibevent::stop_operations() {
   }
 
   // master thread stop
-  event_base_loopexit(dispatcher_thread_.base_, NULL);
+  event_base_loopexit(dispatcher_thread_->base_, NULL);
 
   // destroy mutex and cond
   pthread_mutex_destroy(&init_lock_);
   pthread_cond_destroy(&init_cond_);
+  
+  // free freelist of connection
+  MyQueue::cqi_flist_destroy(cqi_flist_);
 
-  // free base event of master and slave threads
-  for(i = 0; i < threads_init_num_; ++i) {
+  // free event_base of master and slave threads
+  for(i = 0; i < threads_init_num_; ++i)
     event_base_free(threads_[i].base_);
-  }
-  event_base_free(dispatcher_thread_.base_);
+  event_base_free(dispatcher_thread_->base_);
 
-  // free connection item freelist
-  pthread_mutex_destroy( &(cqi_flist_->cqi_freelist_lock_) );
-  if(NULL != cqi_flist_) {
-    CQ_ITEM *ptr1 = cqi_flist_->cqi_freelist_;
-    while(ptr1) {
-      CQ_ITEM *ptr2 = ptr1;
-      ptr1 = ptr1->next_;
-      free(ptr2);
-      ptr2 = NULL;
-    }
-    free(cqi_flist_);
-    cqi_flist_ = NULL;
-  }
+  // free connection queue of slave threads
+  for(i = 0; i < threads_init_num_; ++i)
+    MyQueue::cq_destroy(threads_[i].conn_queue_);
+  
+  free(threads_); 
+  free(dispatcher_thread_);
 }
+
+
+/**
+ * Sever start.
+ *
+ * @param sockfd: socket fd
+ * @param main_base: pointer ot dispatcher event_base
+ */
+void MyLibevent::server_start(int sockfd, struct event_base *main_base) {
+  libevent_thread_init();
+  master_thread_loop(sockfd, main_base);
+}
+
 
 /**
  * Initialize libevent thread
  */
 void MyLibevent::libevent_thread_init() {
   int i;
-  threads_ = (LIBEVENT_THREAD*)calloc(threads_total_num_, sizeof(LIBEVENT_THREAD));
-  if(NULL == threads_) {
-    perror("Can't allocate thread descriptors");
-    exit(EXIT_FAILURE);
-  }
 
   for(i = 0; i < threads_total_num_; ++i) {
     // setup pipe between master and slave threads
@@ -164,7 +169,7 @@ void MyLibevent::libevent_thread_setup(LIBEVENT_THREAD *me) {
     exit(EXIT_FAILURE);
   }
 
-  // let slave thread monitor pipe
+  // slave thread monitors read-end of pipe
   me->notify_event_ = event_new(me->base_, 
                                 me->recv_fd_, 
                                 EV_READ|EV_PERSIST, 
@@ -198,7 +203,7 @@ void MyLibevent::libevent_thread_process(evutil_socket_t fd, short what, void *a
     fprintf(stderr, "Can't read from libevent pipe.\n");
 
 #ifdef PRINT_DEBUG
-  printf("Connected, ready to read!\n");
+  printf("Connected, thread %lu ready to process!\n", me->tid_);
 #endif
 
   switch(buf[0]) {
@@ -231,7 +236,10 @@ void MyLibevent::libevent_thread_process(evutil_socket_t fd, short what, void *a
     // pause
     case 'p':
     event_base_loopexit(me->base_, NULL);
+
+#ifdef PRINT_DEBUG
     printf("Slave thread stop\n");
+#endif
   }
 }
 
@@ -268,7 +276,7 @@ void* MyLibevent::worker_libevent(void *arg) {
   pthread_cond_signal(&me->ml_ptr_->init_cond_);
   pthread_mutex_unlock(&me->ml_ptr_->init_lock_);
   
-  event_base_dispatch(me->base_);
+  event_base_dispatch(me->base_);  // slave thread start
 
   return NULL;
 }
@@ -283,35 +291,34 @@ void* MyLibevent::worker_libevent(void *arg) {
 void MyLibevent::master_thread_loop(int sockfd, struct event_base *main_base) {
 
   // Setup dispatcher thread
-  dispatcher_thread_.tid_ = pthread_self();
-  dispatcher_thread_.base_ = main_base;
-  dispatcher_thread_.ml_ptr_ = this;
+  dispatcher_thread_->tid_ = pthread_self();
+  dispatcher_thread_->base_ = main_base;
+  dispatcher_thread_->ml_ptr_ = this;
 
 #ifdef PRINT_DEBUG
-  printf("Dispatcher thread %lu started\n", dispatcher_thread_.tid_);
+  printf("Dispatcher thread %lu started\n", dispatcher_thread_->tid_);
 #endif
 
-  struct event *main_event = event_new(dispatcher_thread_.base_, 
+  struct event *main_event = event_new(dispatcher_thread_->base_, 
                                        sockfd, 
                                        EV_READ|EV_PERSIST, 
                                        accept_cb, 
-                                       (void*)&dispatcher_thread_);
+                                       (void*)dispatcher_thread_);
   if(event_add(main_event, NULL) == -1) {
     perror("event_add failed");
     exit(EXIT_FAILURE);
   }
  
   struct timeval check_tv = {CHECK_PERIOD, 0};
-  struct event *check_event = event_new(dispatcher_thread_.base_, 
+  struct event *check_event = event_new(dispatcher_thread_->base_, 
                                         -1, EV_TIMEOUT|EV_PERSIST, 
-                                        timeout_cb, (void*)&dispatcher_thread_);
+                                        timeout_cb, (void*)dispatcher_thread_);
   if(event_add(check_event, &check_tv) == -1) {
     perror("event_add failed");
     exit(EXIT_FAILURE);
   }
   
-  event_base_dispatch(dispatcher_thread_.base_);
-
+  event_base_dispatch(dispatcher_thread_->base_);
 }
 
 
@@ -328,6 +335,7 @@ void MyLibevent::accept_cb(int fd, short what, void *arg) {
   if(connfd == -1) {
     if(errno == EAGAIN || errno == EWOULDBLOCK) {
       // TO DO
+      return ;
     } else {
       fprintf(stderr, "Too many open connections.\n");
       exit(EXIT_FAILURE);
@@ -349,7 +357,7 @@ void MyLibevent::accept_cb(int fd, short what, void *arg) {
 
 
 /**
- * Dispatch new connection ( called by master thread )
+ * Dispatch new connection ( only called by master thread )
  *
  * @param sfd: socket fd used for conncetion
  * @param ev_flag: event flags
@@ -366,16 +374,15 @@ void MyLibevent::dispatch_conn_new(int sfd, int ev_flag, void *arg) {
     fprintf(stderr, "Failed to allocate memory for connection object\n");
     return ;
   }
+  item->fd_ = sfd;
+  item->ev_flag_ = ev_flag;
 
-  // worker distribution
+  // worker distribution ( Round Robin )
   tid = (me->ml_ptr_->last_thread_ + 1) % me->ml_ptr_->threads_total_num_;
   me->ml_ptr_->last_thread_ = tid;
   
   LIBEVENT_THREAD *thread = me->ml_ptr_->threads_ + tid;
 
-  item->fd_ = sfd;
-  item->ev_flag_ = ev_flag;
- 
   // add task to connection queue
   MyQueue::cq_push(thread->conn_queue_, item);
   
@@ -424,11 +431,21 @@ void MyLibevent::readcb(struct bufferevent *bev, void *ctx) {
   int fd = bufferevent_getfd(bev);
   time_t now = time(NULL);
 
+  int ret;
+
 #ifdef PRINT_DEBUG
   printf("\nThread %lu is processing now\n", me->tid_);
 #endif
 
-  me->ml_ptr_->myfd_.fd_update_visited_time(fd, now);
+  ret = me->ml_ptr_->myfd_.fd_update_visited_time(fd, now);
+
+#ifdef PRINT_DEBUG
+  if(ret == 1) {
+    printf("Update fd = %d success\n", fd);
+  } else {
+    printf("Update fd = %d failed\n", fd);
+  }
+#endif
   
   evbuffer_add_buffer(output, input);
 }
@@ -439,6 +456,7 @@ void MyLibevent::readcb(struct bufferevent *bev, void *ctx) {
  */
 void MyLibevent::writecb(struct bufferevent *bev, void *ctx) {
   // TO DO
+  return ;
 }
 
 

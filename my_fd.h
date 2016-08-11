@@ -3,8 +3,8 @@
 
 #include "my_mutex.h"
 
-// max connection number
-#define MAX_CONN  1024
+// max connection number (C10K)
+#define MAX_CONN  1000*10
 
 // seconds of no operation
 #define NO_OPERATION_DURATION 60*2
@@ -13,7 +13,7 @@
 #define GET_FD_LOG
 
 #ifdef  GET_FD_LOG
-#define CHAR_ARRAY_SIZE 256
+#define CHAR_ARRAY_SIZE 128
 #endif
 
 
@@ -38,7 +38,7 @@ class MyFd {
   MyFd(const MyFd&) = delete;
   MyFd &operator=(const MyFd&) = delete;
 
-#ifndef GETLOGOFF
+#ifdef GET_FD_LOG
   void get_format_time(char *s, size_t max, const struct tm *tm);
 #endif
 

@@ -9,7 +9,7 @@ MyQueue::~MyQueue() {}
 /**
  * Initialize connection queue.
  *
- * @param cq: pointer to the connection queue
+ * @param cq: pointer to connection queue
  */
 void MyQueue::cq_init(CQ *cq) {
   int res;
@@ -21,8 +21,32 @@ void MyQueue::cq_init(CQ *cq) {
   cq->tail_ = NULL;
 }
 
+
 /**
- * Initialize connection queue freelist.
+ * Destroy connection queue.
+ *
+ * @param cq: pointer to connection queue
+ */
+void MyQueue::cq_destroy(CQ *cq) {
+  pthread_mutex_lock(&cq->lock_);
+  if(NULL != cq) {
+    CQ_ITEM *cqi_one = cq->head_;
+    while(NULL != cqi_one) {
+      CQ_ITEM *cqi_two = cqi_one->next_;
+      cqi_one = cqi_one->next_;
+      free(cqi_two);
+      cqi_two = NULL;
+    }
+    free(cq);
+    cq = NULL;
+  }
+  pthread_mutex_unlock(&cq->lock_);
+
+  pthread_mutex_destroy(&cq->lock_);
+}
+
+/**
+ * Initialize freelist of connection queue.
  *
  * @param cqi_flist: pointer to freelist
  */
@@ -36,56 +60,26 @@ void MyQueue::cqi_flist_init(CQ_ITEM_FLIST *cqi_flist) {
 }
 
 /**
- * Get a connection queue item from freelist.
+ * Destroy freelist of connection queue.
  *
  * @param cqi_flist: pointer to freelist
- * @return a fresh connection queue item
  */
-CQ_ITEM* MyQueue::cqi_new(CQ_ITEM_FLIST *cqi_flist) {
-  CQ_ITEM *item = NULL;
+void MyQueue::cqi_flist_destroy(CQ_ITEM_FLIST *cqi_flist) {
   pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
-  if(cqi_flist->cqi_freelist_) {
-    item = cqi_flist->cqi_freelist_;
-    cqi_flist->cqi_freelist_ = item->next_;
+  if(NULL != cqi_flist) {
+    CQ_ITEM *cqi_one = cqi_flist->cqi_freelist_;
+    while(NULL != cqi_one) {
+      CQ_ITEM *cqi_two = cqi_one;
+      cqi_one = cqi_one->next_;
+      free(cqi_two);
+      cqi_two = NULL;
+    }
+    free(cqi_flist);
+    cqi_flist = NULL;
   }
   pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
-   
-  if(NULL == item) {
-    int i;
 
-    // Allocate a bunch of items at once to reduce fragmentation
-    item = (CQ_ITEM*)malloc(ITEMS_PER_ALLOC * sizeof(CQ_ITEM));
-    if(NULL == item) {
-      perror("Failed to allocate memory for item.");
-      return NULL;
-    }
-
-    // Link together all the new items except the first one
-    for(i = 2; i < ITEMS_PER_ALLOC; ++i) {
-      item[i-1].next_ = &item[i];
-    }
-
-    // Link the last one to the second one (the first one will be returned)
-    pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
-    item[ITEMS_PER_ALLOC-1].next_ = cqi_flist->cqi_freelist_;
-    cqi_flist->cqi_freelist_ = &item[1];
-    pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
-  }
-
-  return item;
-}
-
-/**
- * Frees a connection queue item (adds it to the freelist).
- *
- * @param item: the connection queue item to be freed
- * @param cqi_flist: pointer to freelist
- */
-void MyQueue::cqi_free(CQ_ITEM *item, CQ_ITEM_FLIST *cqi_flist) {
-  pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
-  item->next_ = cqi_flist->cqi_freelist_;
-  cqi_flist->cqi_freelist_ = item;
-  pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
+  pthread_mutex_destroy(&cqi_flist->cqi_freelist_lock_);
 }
 
 /**
@@ -115,7 +109,7 @@ void MyQueue::cq_push(CQ *cq, CQ_ITEM *item) {
  * @return an item, or NULL if no item is available
  */
 CQ_ITEM* MyQueue::cq_pop(CQ *cq) {
-  CQ_ITEM *item;
+  CQ_ITEM *item = NULL;
 
   pthread_mutex_lock(&cq->lock_);
   item = cq->head_;  // get the head
@@ -128,4 +122,61 @@ CQ_ITEM* MyQueue::cq_pop(CQ *cq) {
   
   return item;
 }
+
+
+/**
+ * Get a connection queue item from freelist.
+ *
+ * @param cqi_flist: pointer to freelist
+ * @return a fresh connection queue item
+ */
+CQ_ITEM* MyQueue::cqi_new(CQ_ITEM_FLIST *cqi_flist) {
+  CQ_ITEM *item = NULL;
+
+  pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
+  if(cqi_flist->cqi_freelist_) {
+    item = cqi_flist->cqi_freelist_;  // get the head node
+    cqi_flist->cqi_freelist_ = item->next_;
+  }
+  pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
+   
+  if(NULL == item) {
+    int i;
+
+    // Allocate a bunch of items at once to reduce fragmentation
+    item = (CQ_ITEM*)malloc(ITEMS_PER_ALLOC * sizeof(CQ_ITEM));
+    if(NULL == item) {
+      perror("Failed to allocate memory for item.");
+      return NULL;
+    }
+
+    // Link together all the new items except the first one
+    for(i = 2; i < ITEMS_PER_ALLOC; ++i) {
+      item[i-1].next_ = &item[i];
+    }
+
+    // Link the last one to the second one (the first one will be returned)
+    pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
+    item[ITEMS_PER_ALLOC-1].next_ = cqi_flist->cqi_freelist_;
+    cqi_flist->cqi_freelist_ = &item[1];
+    pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
+  }
+
+  return item;
+}
+
+
+/**
+ * Frees a connection queue item (adds it to the freelist).
+ *
+ * @param item: the connection queue item to be freed
+ * @param cqi_flist: pointer to freelist
+ */
+void MyQueue::cqi_free(CQ_ITEM *item, CQ_ITEM_FLIST *cqi_flist) {
+  pthread_mutex_lock(&cqi_flist->cqi_freelist_lock_);
+  item->next_ = cqi_flist->cqi_freelist_;
+  cqi_flist->cqi_freelist_ = item;
+  pthread_mutex_unlock(&cqi_flist->cqi_freelist_lock_);
+}
+
 

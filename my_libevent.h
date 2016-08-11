@@ -10,7 +10,7 @@
 #include "my_queue.h"
 #include "my_fd.h"
 
-#define DEFAULT_MAXTHREADS (sysconf(_SC_NPROCESSORS_CONF)-1)
+#define MAX_SLAVE_THREAD_NUM (sysconf(_SC_NPROCESSORS_CONF)-1)
 
 //#define PRINT_DEBUG
 
@@ -20,6 +20,7 @@
 
 #define CHECK_PERIOD 60
 
+/* structure of slave thread */
 typedef struct {
   pthread_t tid_;
   int recv_fd_;
@@ -27,9 +28,10 @@ typedef struct {
   struct event_base *base_;
   struct event *notify_event_;
   CQ *conn_queue_;
-  MyLibevent *ml_ptr_;
+  MyLibevent *ml_ptr_;  // Used to get the address of MyLibevent object
 } LIBEVENT_THREAD;
 
+/* structure of master thread */
 typedef struct {
   pthread_t tid_;
   struct event_base *base_;
@@ -79,7 +81,7 @@ class MyLibevent {
 
   CQ_ITEM_FLIST *cqi_flist_;
   LIBEVENT_THREAD *threads_;
-  LIBEVENT_DISPATCHER_THREAD dispatcher_thread_;
+  LIBEVENT_DISPATCHER_THREAD *dispatcher_thread_;
   MyFd myfd_;
 };
 

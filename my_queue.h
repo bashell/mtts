@@ -41,7 +41,9 @@ class MyQueue {
 
  private:
   static void cq_init(CQ *cq);
+  static void cq_destroy(CQ *cq);
   static void cqi_flist_init(CQ_ITEM_FLIST *cqi_flist);
+  static void cqi_flist_destroy(CQ_ITEM_FLIST *cqi_flist);
   static void cq_push(CQ *cq, CQ_ITEM *item);
   static CQ_ITEM *cq_pop(CQ *cq);
   static CQ_ITEM *cqi_new(CQ_ITEM_FLIST *cqi_flist);
