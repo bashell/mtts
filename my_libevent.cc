@@ -9,7 +9,8 @@
 
 MyLibevent::MyLibevent() 
   : last_thread_(-1), threads_total_num_(MAX_SLAVE_THREAD_NUM), 
-    threads_init_num_(0), cqi_flist_(NULL), threads_(NULL) 
+    threads_init_num_(0), cqi_flist_(NULL), 
+    threads_(NULL), dispatcher_thread_(NULL)
 {
   start_operations();
 }
@@ -17,7 +18,8 @@ MyLibevent::MyLibevent()
 
 MyLibevent::MyLibevent(int nthreads) : 
     last_thread_(-1), threads_total_num_(nthreads), 
-    threads_init_num_(0), cqi_flist_(NULL), threads_(NULL)
+    threads_init_num_(0), cqi_flist_(NULL),
+    threads_(NULL), dispatcher_thread_(NULL)
 {
   start_operations();
 } 

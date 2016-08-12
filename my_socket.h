@@ -13,6 +13,6 @@ int socket_set_reusable(int fd);
 
 int socket_setup(const char *ip, int port);
 
-};
+}  // namespace mysocket
 
 #endif  /* _MY_SOCKET_H_ */
