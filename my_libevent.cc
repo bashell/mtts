@@ -6,6 +6,7 @@
 
 #include "my_libevent.h"
 
+using namespace mtts;
 
 MyLibevent::MyLibevent() 
   : last_thread_(-1), threads_total_num_(MAX_SLAVE_THREAD_NUM), 

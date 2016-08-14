@@ -4,7 +4,7 @@
 // Max length of listen queue in Kernel
 #define BACKLOG 1024
 
-namespace mysocket 
+namespace mysocket
 {
 
 int socket_set_nonblock(int fd);

@@ -5,6 +5,8 @@
 
 #define ITEMS_PER_ALLOC 64
 
+namespace mtts
+{
 
 /* item in connection queue */
 typedef struct conn_queue_item CQ_ITEM;
@@ -54,5 +56,6 @@ class MyQueue {
   MyQueue &operator=(const MyQueue&) = delete;
 };
 
+}  // namespace mtts
 
 #endif  /* _MY_QUEUE_H_ */

@@ -6,6 +6,7 @@
 #include "my_fd.h"
 #include "my_socket.h"
 
+using namespace mtts;
 
 MyFd::MyFd() : fd_set_(NULL) {}
 

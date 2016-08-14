@@ -20,6 +20,9 @@
 
 #define CHECK_PERIOD 60
 
+namespace mtts
+{
+
 /* structure of slave thread */
 typedef struct {
   pthread_t tid_;
@@ -84,5 +87,7 @@ class MyLibevent {
   LIBEVENT_DISPATCHER_THREAD *dispatcher_thread_;
   MyFd myfd_;
 };
+
+}  // namespace mtts
 
 #endif  /* _MY_LIBEVENT_H_ */

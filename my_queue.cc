@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include "my_queue.h"
 
+using namespace mtts;
+
 MyQueue::MyQueue() {}
 
 MyQueue::~MyQueue() {}

@@ -12,6 +12,9 @@
     exit(EXIT_FAILURE);\
   } while(0)
 
+namespace mtts
+{
+
 class MutexLockGuard;
 
 class MutexLock {
@@ -88,6 +91,7 @@ inline MutexLockGuard::~MutexLockGuard() {
   mutex_.unlock();
 }
 
+}  // namespace mtts
 
 #define MutexLockGuard(m) "ERROR"
 

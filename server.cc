@@ -1,6 +1,8 @@
 #include <libgen.h>
 #include "my_libevent.h"
 
+using namespace mtts;
+
 int main(int argc, char *argv[]) {
   if(argc != 3) {
     fprintf(stderr, "Usage: %s IP PORT\n", basename(argv[0]));

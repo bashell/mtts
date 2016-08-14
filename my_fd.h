@@ -16,6 +16,8 @@
 #define CHAR_ARRAY_SIZE 128
 #endif
 
+namespace mtts
+{
 
 typedef struct {
   int fd_;
@@ -49,5 +51,6 @@ class MyFd {
   MutexLock mutex_;
 };
 
+}  // namespace mtts
 
 #endif  /* _MY_FD_H_ */
